@@ -11,8 +11,8 @@ def parse_hackrf_sweep(line):
 
     try:
         timestamp = parts[1]  # Use time as a grouping key
-        freq_start = float(parts[2])
-        freq_end = float(parts[3])
+        freq_start = int(parts[2])
+        freq_end = int(parts[3])
         freq_step = float(parts[4])
         powers = list(map(float, parts[6:]))
         frequencies = np.arange(freq_start, freq_end, freq_step)
@@ -62,22 +62,32 @@ def spectrograph(stdscr):
                 debug_log.append(f"Freq range: {min_freq} - {max_freq}, Data points: {len(all_frequencies)}")
                 debug_log.pop(0)
 
+                # Draw spectrum panel with box
+                spectrum_height = max_y - 6
+                spectrum_win = stdscr.subwin(spectrum_height, max_x, 0, 0)
+                spectrum_win.box()
+                spectrum_win.addstr(0, 2, " Spectrum Display ", curses.A_REVERSE)
+
                 # Map frequencies to screen width
-                mapped_indices = np.linspace(0, max_x - 1, len(all_frequencies)).astype(int)
-                normalized_powers = np.interp(all_powers, [min_power, max_power], [0, max_y - 4])
+                mapped_indices = np.linspace(1, max_x - 2, len(all_frequencies)).astype(int)
+                normalized_powers = np.interp(all_powers, [min_power, max_power], [1, spectrum_height - 2])
 
                 spectrum.fill(0)
                 for i, index in enumerate(mapped_indices):
                     spectrum[index] = max(spectrum[index], normalized_powers[i])
 
-                for x in range(max_x):
+                for x in range(1, max_x - 1):
                     height = int(spectrum[x])
                     for y in range(height):
-                        stdscr.addch(max_y - 4 - y, x, '|')
+                        spectrum_win.addch(spectrum_height - 2 - y, x, '|')
 
-                # Display debug log at the bottom
+                # Draw debug panel with box
+                debug_start = spectrum_height
+                debug_win = stdscr.subwin(5, max_x, debug_start, 0)
+                debug_win.box()
+                debug_win.addstr(0, 2, " Debug Log ", curses.A_REVERSE)
                 for i, log in enumerate(debug_log):
-                    stdscr.addstr(max_y - 3 + i, 0, log[:max_x])
+                    debug_win.addstr(i + 1, 1, log[:max_x - 2])
 
                 stdscr.refresh()
                 curses.napms(50)
