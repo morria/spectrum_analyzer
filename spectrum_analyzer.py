@@ -4,14 +4,14 @@ import curses
 import numpy as np
 import time
 import threading
-# import queue
 import logging
 from spectrum_analyzer import hackrf_sweep, transform_coordinates
 
 # Constants
-FRAME_RATE = 8  # FPS limit
-SPECTRUM_HEIGHT = 6
-DEBUG_HEIGHT = 3
+FRAME_RATE = 16
+SPECTRUM_HEIGHT = 5
+DEBUG_HEIGHT = 1
+LABEL_SPACING = 8  # Spacing between frequency labels (6 characters label + 2 space)
 
 def init_colors():
     """Initializes color pairs for spectrum visualization."""
@@ -23,7 +23,7 @@ def init_colors():
     curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
     curses.init_pair(6, curses.COLOR_RED, curses.COLOR_BLACK)  # Max power
 
-def get_color(power, min_power=-100, max_power=0):
+def get_color(power, min_power=-100, max_power=-10):
     """Maps power levels to corresponding color pairs."""
     normalized = int(np.interp(power, [min_power, max_power], [1, 6]))
     return curses.color_pair(normalized)
@@ -36,12 +36,8 @@ def spectrum_analyzer(stdscr, frequency_power_generator, stop_event):
     max_y, max_x = stdscr.getmaxyx()
     time_series_height = max(max_y - DEBUG_HEIGHT - SPECTRUM_HEIGHT, 0)
 
-    stdscr.addstr(0, 0, f"{time_series_height + SPECTRUM_HEIGHT + DEBUG_HEIGHT}")
-
     spectrum_win    = stdscr.subwin(SPECTRUM_HEIGHT,    max_x, 0,                       0)
     time_series_win = stdscr.subwin(time_series_height, max_x, SPECTRUM_HEIGHT,         0)
-    # debug_win       = stdscr.subwin(DEBUG_HEIGHT,       max_x, SPECTRUM_HEIGHT + time_series_height, 0)
-    # debug_message = []
 
     time_series = []
     last_update_time = time.time()
@@ -61,45 +57,46 @@ def spectrum_analyzer(stdscr, frequency_power_generator, stop_event):
                 continue
             last_update_time = current_time
 
-            spectrum_win.clear()
             spectrum_win.box()
             spectrum_win.addstr(0, 2, " Spectrograph ")
 
             latest_data = time_series[0] if time_series else {}
-
             remapped_data = transform_coordinates.remap_x(latest_data, max_x - 2)
-
-            sorted_frequencies = sorted(remapped_data.keys())
-            sorted_powers = [remapped_data[freq] for freq in sorted_frequencies]
-            mapped_indices = np.linspace(1, max_x - 2, len(sorted_frequencies)).astype(int)
+            sorted_x = sorted(remapped_data.keys())
+            sorted_powers = [remapped_data[freq] for freq in sorted_x]
+            mapped_indices = np.linspace(1, max_x - 2, len(sorted_x)).astype(int)
             normalized_powers = np.interp(sorted_powers, [-100, 0], [1, SPECTRUM_HEIGHT - 2])
 
+            max_height = SPECTRUM_HEIGHT - 2
             for i, index in enumerate(mapped_indices):
                 height = int(normalized_powers[i])
                 for y in range(height):
-                    spectrum_win.addch(SPECTRUM_HEIGHT - 2 - y, index, curses.ACS_CKBOARD, get_color(sorted_powers[i]))
+                    spectrum_win.addch(SPECTRUM_HEIGHT - 2 - y, index, '█', get_color(sorted_powers[i]))
+                for y in range(height, max_height):
+                    spectrum_win.addch(SPECTRUM_HEIGHT - 2 - y, index, ' ', get_color(sorted_powers[i]))
+
+            # Draw frequency labels under the spectrograph
+            label_positions = range(1, max_x - 6, LABEL_SPACING)
+            sorted_frequencies = sorted(latest_data.keys())
+            label_frequencies = np.linspace(sorted_frequencies[0]/1000000, sorted_frequencies[-1]/1000000, len(label_positions))
+            for pos, freq in zip(label_positions, label_frequencies):
+                spectrum_win.addstr(SPECTRUM_HEIGHT - 1, pos, f"{freq:.2f}")
 
             # Update time series visualization
-            time_series_win.clear()
             time_series_win.box()
             time_series_win.addstr(0, 2, " Time Series ")
 
             for row, data in enumerate(time_series[:time_series_height - 2]):
-                sorted_frequencies = sorted(data.keys())
-                sorted_powers = [data[freq] for freq in sorted_frequencies]
-                mapped_indices = np.linspace(1, max_x - 2, len(sorted_frequencies)).astype(int)
+                sorted_x = sorted(data.keys())
+                sorted_powers = [data[freq] for freq in sorted_x]
+                mapped_indices = np.linspace(1, max_x - 2, len(sorted_x)).astype(int)
 
                 for i, index in enumerate(mapped_indices):
-                    time_series_win.addch(row + 1, index, curses.ACS_CKBOARD, get_color(sorted_powers[i]))
+                    time_series_win.addch(row + 1, index, '█', get_color(sorted_powers[i]))
 
-            # debug_win.clear()
-            # debug_win.addstr(0, 0, f"{debug_message[:max_x-1]}")
-
-            # Refresh all windows
             stdscr.refresh()
             spectrum_win.refresh()
             time_series_win.refresh()
-            # debug_win.refresh()
     except KeyboardInterrupt:
         stop_event.set()
     finally:
@@ -124,4 +121,3 @@ if __name__ == "__main__":
         )
     finally:
         stop_event.set()
-
