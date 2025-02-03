@@ -1,4 +1,4 @@
-# CLI Spectrum Analyzer
+# CLI hackrf_sweep Spectrum Analyzer
 
 This is a simple command line interface (CLI) spectrum analyzer meant to display the output of [hackrf_sweep](https://hackrf.readthedocs.io/en/latest/hackrf_tools.html#hackrf-sweep).
 
