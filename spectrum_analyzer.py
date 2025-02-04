@@ -6,7 +6,7 @@ import time
 import threading
 import logging
 from spectrum_analyzer import hackrf_sweep, transform_coordinates
-from math import ceil
+from math import ceil, floor
 
 # Constants
 FRAME_RATE = 16
@@ -17,18 +17,18 @@ LABEL_SPACING = 8  # Spacing between frequency labels (6 characters label + 2 sp
 def init_colors():
     """Initializes color pairs for spectrum visualization."""
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_BLUE, curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_CYAN, curses.COLOR_BLACK)
-    curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)
-    curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    curses.init_pair(1, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_BLUE, curses.COLOR_BLACK)
+    curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.init_pair(5, curses.COLOR_YELLOW, curses.COLOR_BLACK)
     curses.init_pair(6, curses.COLOR_RED, curses.COLOR_BLACK)
 
 def get_color(power: float):
     """Maps power levels to corresponding color pairs."""
     min_power=-100
     max_power=-10
-    normalized = int(ceil(np.interp(power, [min_power, max_power], [1, 6])))
+    normalized = int(ceil(np.interp(power, [min_power, max_power], [0.1, 7])))
     # logging.info(f"{power}:{normalized}")
     return curses.color_pair(normalized)
 
