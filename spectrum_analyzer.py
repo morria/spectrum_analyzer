@@ -6,6 +6,7 @@ import time
 import threading
 import logging
 from spectrum_analyzer import hackrf_sweep, transform_coordinates
+from math import ceil
 
 # Constants
 FRAME_RATE = 16
@@ -23,9 +24,12 @@ def init_colors():
     curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
     curses.init_pair(6, curses.COLOR_RED, curses.COLOR_BLACK)  # Max power
 
-def get_color(power, min_power=-100, max_power=-10):
+def get_color(power: float):
     """Maps power levels to corresponding color pairs."""
+    min_power=-100
+    max_power=0
     normalized = int(np.interp(power, [min_power, max_power], [1, 6]))
+    # logging.info(f"{power}:{normalized}")
     return curses.color_pair(normalized)
 
 def spectrum_analyzer(stdscr, frequency_power_generator, stop_event):
@@ -65,14 +69,26 @@ def spectrum_analyzer(stdscr, frequency_power_generator, stop_event):
             sorted_x = sorted(remapped_data.keys())
             sorted_powers = [remapped_data[freq] for freq in sorted_x]
             mapped_indices = np.linspace(1, max_x - 2, len(sorted_x)).astype(int)
-            normalized_powers = np.interp(sorted_powers, [-100, 0], [1, SPECTRUM_HEIGHT - 2])
+            normalized_powers = np.interp(sorted_powers, [-80, -20], [0, SPECTRUM_HEIGHT - 2])
+
+            charmap = {
+                8.0/8.0: '\u2588',
+                7.0/8.0: '\u2587',
+                6.0/8.0: '\u2586',
+                5.0/8.0: '\u2585',
+                4.0/8.0: '\u2584',
+                3.0/8.0: '\u2583',
+                2.0/8.0: '\u2582',
+                1.0/8.0: '\u2581',
+            }
 
             max_height = SPECTRUM_HEIGHT - 2
             for i, index in enumerate(mapped_indices):
-                height = int(normalized_powers[i])
-                for y in range(height):
-                    spectrum_win.addch(SPECTRUM_HEIGHT - 2 - y, index, '█', get_color(sorted_powers[i]))
-                for y in range(height, max_height):
+                height = int(normalized_powers[i]*8)/8
+                for y in range(int(ceil(height))):
+                    c = charmap[min(height-y, 1.0)]
+                    spectrum_win.addch(SPECTRUM_HEIGHT - 2 - y, index, c, get_color(sorted_powers[i]))
+                for y in range(int(ceil(height)), max_height):
                     spectrum_win.addch(SPECTRUM_HEIGHT - 2 - y, index, ' ', get_color(sorted_powers[i]))
 
             # Draw frequency labels under the spectrograph
@@ -86,13 +102,14 @@ def spectrum_analyzer(stdscr, frequency_power_generator, stop_event):
             time_series_win.box()
             time_series_win.addstr(0, 2, " Time Series ")
 
+            c = '\u2588'
             for row, data in enumerate(time_series[:time_series_height - 2]):
                 sorted_x = sorted(data.keys())
                 sorted_powers = [data[freq] for freq in sorted_x]
                 mapped_indices = np.linspace(1, max_x - 2, len(sorted_x)).astype(int)
 
                 for i, index in enumerate(mapped_indices):
-                    time_series_win.addch(row + 1, index, '█', get_color(sorted_powers[i]))
+                    time_series_win.addch(row + 1, index, c, get_color(sorted_powers[i]))
 
             stdscr.refresh()
             spectrum_win.refresh()
