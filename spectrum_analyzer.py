@@ -15,21 +15,26 @@ DEBUG_HEIGHT = 1
 LABEL_SPACING = 8  # Spacing between frequency labels (6 characters label + 2 space)
 
 def init_colors():
-    """Initializes color pairs for spectrum visualization."""
     curses.start_color()
     curses.init_pair(1, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_BLUE, curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    # Blue is showing up as red for some reason. My terminal is
+    # being weird so I'm just going to exclude it.
+    # curses.init_pair(2, curses.COLOR_BLUE, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)
     curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(5, curses.COLOR_YELLOW, curses.COLOR_BLACK)
     curses.init_pair(6, curses.COLOR_RED, curses.COLOR_BLACK)
 
-def get_color(power: float):
+def get_color(power: float, min_power = -100.0, max_power = -20.0):
     """Maps power levels to corresponding color pairs."""
-    min_power=-100
-    max_power=-10
-    normalized = int(ceil(np.interp(power, [min_power, max_power], [0.1, 7])))
-    # logging.info(f"{power}:{normalized}")
+
+    # Trim off the extreme values
+    power = min(max(power, -100), 0)
+
+    # Map to [1, 6] range inclusive.
+    normalized = int(6 * (power - min_power) / (max_power - min_power)) + 1
+
     return curses.color_pair(normalized)
 
 def spectrum_analyzer(stdscr, frequency_power_generator, stop_event):
