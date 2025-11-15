@@ -317,10 +317,7 @@ class SpectrumAnalyzerApp(App):
         self.frame_interval = 1 / config['fps']
         self.min_power = config['min_power']
         self.max_power = config['max_power']
-
-        # Start data thread
-        self.data_thread = threading.Thread(target=self._data_worker, daemon=True)
-        self.data_thread.start()
+        self.data_thread = None
 
     def compose(self) -> ComposeResult:
         """Create child widgets."""
@@ -346,6 +343,11 @@ class SpectrumAnalyzerApp(App):
         yield self.status
         yield self.help_overlay
 
+    def on_mount(self) -> None:
+        """Start the data worker thread after the app is mounted."""
+        self.data_thread = threading.Thread(target=self._data_worker, daemon=True)
+        self.data_thread.start()
+
     def _data_worker(self):
         """Background thread to consume data from the generator."""
         try:
@@ -369,10 +371,24 @@ class SpectrumAnalyzerApp(App):
                     current_time = time.time()
                     if current_time - self.last_update_time >= self.frame_interval:
                         self.last_update_time = current_time
-                        self.call_from_thread(self._update_display, frequency_power_map)
-        except Exception as e:
-            logging.error(f"Error in data worker: {e}")
+                        try:
+                            self.call_from_thread(self._update_display, frequency_power_map)
+                        except Exception as e:
+                            logging.error(f"Error updating display: {e}")
+                            if self.stop_event.is_set():
+                                break
+        except KeyboardInterrupt:
+            # Handle Ctrl+C gracefully
             self.stop_event.set()
+        except Exception as e:
+            logging.error(f"Error in data worker: {e}", exc_info=True)
+            self.stop_event.set()
+        finally:
+            # Signal the app to exit
+            try:
+                self.call_from_thread(self.exit)
+            except:
+                pass
 
     def _update_display(self, data):
         """Update the display widgets (called from data thread)."""
@@ -429,7 +445,14 @@ class SpectrumAnalyzerApp(App):
 def run_spectrum_analyzer(frequency_power_generator, stop_event, config):
     """Run the spectrum analyzer app."""
     app = SpectrumAnalyzerApp(frequency_power_generator, stop_event, config)
-    app.run()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        stop_event.set()
+    except Exception as e:
+        logging.error(f"Error running app: {e}", exc_info=True)
+        stop_event.set()
+        raise
 
 
 if __name__ == "__main__":
@@ -467,6 +490,23 @@ if __name__ == "__main__":
         # Disable logging if not verbose
         logging.basicConfig(level=logging.CRITICAL)
 
+    # Verify we can access a TTY for the UI
+    import os
+    if not sys.stdin.isatty():
+        # stdin is piped, which is expected for hackrf_sweep data
+        # Textual will automatically use /dev/tty for terminal I/O
+        logging.info("stdin is not a TTY (piped input detected)")
+        # Verify /dev/tty is accessible
+        try:
+            with open('/dev/tty', 'r'):
+                pass
+        except Exception as e:
+            print("Error: Cannot access /dev/tty for terminal I/O", file=sys.stderr)
+            print(f"Details: {e}", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Please ensure you're running in an interactive terminal.", file=sys.stderr)
+            sys.exit(1)
+
     # Build configuration dictionary
     config = {
         'fps': args.fps,
@@ -483,5 +523,8 @@ if __name__ == "__main__":
             stop_event,
             config
         )
+    except KeyboardInterrupt:
+        # User pressed Ctrl+C
+        stop_event.set()
     finally:
         stop_event.set()
