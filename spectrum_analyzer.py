@@ -90,16 +90,6 @@ def spectrum_analyzer(stdscr, frequency_power_generator, stop_event, config):
                     peak_hold = not peak_hold
                     if not peak_hold:
                         peak_data = {}
-                elif key == ord('+') or key == ord('='):
-                    # Increase sensitivity (narrow range)
-                    range_size = max_power - min_power
-                    if range_size > 10:
-                        min_power += 2
-                        max_power -= 2
-                elif key == ord('-') or key == ord('_'):
-                    # Decrease sensitivity (widen range)
-                    min_power -= 2
-                    max_power += 2
                 elif key == curses.KEY_RESIZE:
                     spectrum_win, time_series_win, status_win, max_x, max_y, time_series_height = init_windows()
                     time_series = time_series[:time_series_height - 2]
@@ -142,8 +132,6 @@ def spectrum_analyzer(stdscr, frequency_power_generator, stop_event, config):
                     "  p - Pause/Resume",
                     "  h - Toggle this help",
                     "  m - Toggle peak hold",
-                    "  + - Increase sensitivity",
-                    "  - - Decrease sensitivity",
                     "",
                     "Press 'h' to close this help"
                 ]
