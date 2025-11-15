@@ -1,257 +1,436 @@
 #!/usr/bin/env python3
 import sys
-import curses
 import numpy as np
 import time
 import threading
 import logging
 import argparse
 from spectrum_analyzer import hackrf_sweep, transform_coordinates
-from math import ceil, floor
+from math import ceil
+
+from textual.app import App, ComposeResult
+from textual.widgets import Static, Footer, Header
+from textual.containers import Container, Vertical
+from textual.reactive import reactive
+from textual import events
+from rich.segment import Segment
+from rich.style import Style
+from rich.text import Text
 
 # Default Constants
 DEFAULT_FRAME_RATE = 16
 DEFAULT_SPECTRUM_HEIGHT = 5
 DEFAULT_MIN_POWER = -100.0
 DEFAULT_MAX_POWER = -20.0
-LABEL_SPACING = 8  # Spacing between frequency labels (6 characters label + 2 space)
+LABEL_SPACING = 8  # Spacing between frequency labels
 
-def init_colors():
-    curses.start_color()
-    curses.init_pair(1, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
-    # Blue is showing up as red for some reason. My terminal is
-    # being weird so I'm just going to exclude it.
-    # curses.init_pair(2, curses.COLOR_BLUE, curses.COLOR_BLACK)
-    curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)
-    curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-    curses.init_pair(6, curses.COLOR_RED, curses.COLOR_BLACK)
+# Color mapping for power levels
+COLORS = [
+    "magenta",
+    "magenta",
+    "cyan",
+    "green",
+    "yellow",
+    "red"
+]
 
-def get_color(power: float, min_power: float, max_power: float):
-    """Maps power levels to corresponding color pairs."""
+def get_color(power: float, min_power: float, max_power: float) -> str:
+    """Maps power levels to corresponding colors."""
     # Clamp power to range
     power = max(min_power, min(power, max_power))
 
-    # Map to [1, 6] range inclusive.
+    # Map to color index [0, 5]
     if max_power == min_power:
-        normalized = 1
+        index = 0
     else:
-        normalized = int(6 * (power - min_power) / (max_power - min_power)) + 1
-        normalized = max(1, min(6, normalized))
+        index = int(6 * (power - min_power) / (max_power - min_power))
+        index = max(0, min(5, index))
 
-    return curses.color_pair(normalized)
+    return COLORS[index]
 
-def spectrum_analyzer(stdscr, frequency_power_generator, stop_event, config):
-    """Main function handling spectrum visualization and ncurses display."""
-    curses.curs_set(0)  # Hide cursor
-    stdscr.nodelay(1)  # Enable non-blocking input
-    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
-    init_colors()
 
-    # State variables
-    paused = False
-    peak_hold = False
-    peak_data = {}
-    show_help = False
-    min_power = config['min_power']
-    max_power = config['max_power']
+class SpectrumWidget(Static):
+    """Widget to display the real-time spectrum graph."""
 
-    def init_windows():
-        """Initialize or reinitialize windows after resize."""
-        max_y, max_x = stdscr.getmaxyx()
-        spectrum_height = config['spectrum_height']
-        time_series_height = max(max_y - spectrum_height - 1, 0)
+    data = reactive({})
+    peak_data = reactive({})
+    min_power = reactive(DEFAULT_MIN_POWER)
+    max_power = reactive(DEFAULT_MAX_POWER)
+    peak_hold = reactive(False)
+    paused = reactive(False)
+    spectrum_height = reactive(DEFAULT_SPECTRUM_HEIGHT)
 
-        stdscr.clear()
-        spectrum_win = stdscr.subwin(spectrum_height, max_x, 0, 0)
-        time_series_win = stdscr.subwin(time_series_height, max_x, spectrum_height, 0)
-        status_win = stdscr.subwin(1, max_x, max_y - 1, 0)
+    def render(self) -> Text:
+        """Render the spectrum graph."""
+        width = self.size.width
+        height = self.size.height
 
-        return spectrum_win, time_series_win, status_win, max_x, max_y, time_series_height
+        if height < 3 or width < 3:
+            return Text("")
 
-    spectrum_win, time_series_win, status_win, max_x, max_y, time_series_height = init_windows()
-    time_series = []
-    last_update_time = time.time()
-    frame_interval = 1 / config['fps']
+        # Create title
+        title = "Spectrograph"
+        if self.peak_hold:
+            title += " [PEAK HOLD]"
+        if self.paused:
+            title += " [PAUSED]"
 
-    try:
-        for timestamp, frequency_power_map in frequency_power_generator:
-            # Handle input (keyboard and mouse)
-            try:
-                key = stdscr.getch()
-                if key == ord('q') or key == ord('Q'):
-                    break
-                elif key == ord('p') or key == ord('P'):
-                    paused = not paused
-                elif key == ord('h') or key == ord('H'):
-                    show_help = not show_help
-                elif key == ord('m') or key == ord('M'):
-                    peak_hold = not peak_hold
-                    if not peak_hold:
-                        peak_data = {}
-                elif key == ord('+') or key == ord('='):
-                    # Increase sensitivity (narrow range)
-                    range_size = max_power - min_power
-                    if range_size > 10:
-                        min_power += 2
-                        max_power -= 2
-                elif key == ord('-') or key == ord('_'):
-                    # Decrease sensitivity (widen range)
-                    min_power -= 2
-                    max_power += 2
-                elif key == curses.KEY_RESIZE:
-                    spectrum_win, time_series_win, status_win, max_x, max_y, time_series_height = init_windows()
-                    time_series = time_series[:time_series_height - 2]
-                elif key == curses.KEY_MOUSE:
-                    try:
-                        _, mx, my, _, _ = curses.getmouse()
-                        # Mouse clicked - could implement frequency selection here
-                    except:
-                        pass
-            except:
-                pass
+        # Determine what data to display
+        display_data = self.peak_data if self.peak_hold and self.peak_data else self.data
 
-            if not paused:
-                # Store samples in time series before drawing
-                time_series.insert(0, frequency_power_map)
-                if len(time_series) > time_series_height - 2:
-                    time_series.pop()
+        if not display_data:
+            result = Text(f"╭─ {title} ", style="bold")
+            result.append("─" * (width - len(title) - 4) + "╮\n")
+            for _ in range(height - 3):
+                result.append("│" + " " * (width - 2) + "│\n")
+            result.append("╰" + "─" * (width - 2) + "╯")
+            return result
 
-                # Update peak hold data
-                if peak_hold:
-                    for freq, power in frequency_power_map.items():
-                        peak_data[freq] = max(peak_data.get(freq, float('-inf')), power)
+        # Remap data to screen coordinates
+        remapped_data = transform_coordinates.remap_x(display_data, width - 2)
+        sorted_x = sorted(remapped_data.keys())
+        sorted_powers = [remapped_data[freq] for freq in sorted_x]
+        mapped_indices = np.linspace(0, width - 3, len(sorted_x)).astype(int)
 
-            current_time = time.time()
-            # Only update the display at frame rate intervals
-            if current_time - last_update_time < frame_interval:
+        # Normalize powers to display height
+        graph_height = height - 3  # Account for box borders and labels
+        normalized_powers = np.interp(
+            sorted_powers,
+            [self.min_power, self.max_power],
+            [0, graph_height]
+        )
+
+        # Character map for sub-line resolution
+        charmap = {
+            8.0/8.0: '█',
+            7.0/8.0: '▇',
+            6.0/8.0: '▆',
+            5.0/8.0: '▅',
+            4.0/8.0: '▄',
+            3.0/8.0: '▃',
+            2.0/8.0: '▂',
+            1.0/8.0: '▁',
+        }
+
+        # Build display grid
+        grid = [[' ' for _ in range(width - 2)] for _ in range(graph_height)]
+        colors = [[None for _ in range(width - 2)] for _ in range(graph_height)]
+
+        for i, index in enumerate(mapped_indices):
+            if index >= width - 2:
                 continue
-            last_update_time = current_time
+            height_val = int(normalized_powers[i] * 8) / 8
+            color = get_color(sorted_powers[i], self.min_power, self.max_power)
 
-            # Clear windows
-            spectrum_win.erase()
-            time_series_win.erase()
-            status_win.erase()
+            for y in range(int(ceil(height_val))):
+                if y >= graph_height:
+                    break
+                c = charmap[min(height_val - y, 1.0)]
+                row = graph_height - 1 - y
+                grid[row][index] = c
+                colors[row][index] = color
 
-            if show_help:
-                # Display help overlay
-                help_lines = [
-                    "KEYBOARD SHORTCUTS:",
-                    "  q - Quit",
-                    "  p - Pause/Resume",
-                    "  h - Toggle this help",
-                    "  m - Toggle peak hold",
-                    "  + - Increase sensitivity",
-                    "  - - Decrease sensitivity",
-                    "",
-                    "Press 'h' to close this help"
-                ]
-                start_y = max(0, (max_y - len(help_lines)) // 2)
-                start_x = max(0, (max_x - 40) // 2)
-                for i, line in enumerate(help_lines):
-                    if start_y + i < max_y and len(line) < max_x:
-                        try:
-                            stdscr.addstr(start_y + i, start_x, line, curses.A_REVERSE)
-                        except:
-                            pass
-            else:
-                # Draw spectrum visualization
-                spectrum_win.box()
-                title = " Spectrograph "
-                if peak_hold:
-                    title += "[PEAK HOLD] "
-                if paused:
-                    title += "[PAUSED] "
-                spectrum_win.addstr(0, 2, title)
+        # Build output
+        result = Text()
+        result.append(f"╭─ {title} ", style="bold")
+        result.append("─" * (width - len(title) - 4) + "╮\n")
 
-                latest_data = time_series[0] if time_series else {}
-                if peak_hold and peak_data:
-                    display_data = peak_data.copy()
+        # Draw graph
+        for row_idx, (row, color_row) in enumerate(zip(grid, colors)):
+            result.append("│")
+            for char, color in zip(row, color_row):
+                if color:
+                    result.append(char, style=color)
                 else:
-                    display_data = latest_data
+                    result.append(char)
+            result.append("│\n")
 
-                if display_data:
-                    remapped_data = transform_coordinates.remap_x(display_data, max_x - 2)
-                    sorted_x = sorted(remapped_data.keys())
-                    sorted_powers = [remapped_data[freq] for freq in sorted_x]
-                    mapped_indices = np.linspace(1, max_x - 2, len(sorted_x)).astype(int)
-                    normalized_powers = np.interp(sorted_powers, [min_power, max_power], [0, config['spectrum_height'] - 2])
+        # Draw frequency labels
+        sorted_frequencies = sorted(display_data.keys())
+        if sorted_frequencies:
+            min_freq = sorted_frequencies[0] / 1000000
+            max_freq = sorted_frequencies[-1] / 1000000
 
-                    charmap = {
-                        8.0/8.0: '\u2588',
-                        7.0/8.0: '\u2587',
-                        6.0/8.0: '\u2586',
-                        5.0/8.0: '\u2585',
-                        4.0/8.0: '\u2584',
-                        3.0/8.0: '\u2583',
-                        2.0/8.0: '\u2582',
-                        1.0/8.0: '\u2581',
-                    }
+            label_line = "│"
+            max_labels = max(1, (width - 2) // LABEL_SPACING)
+            label_positions = np.linspace(0, width - 9, max_labels).astype(int)
+            label_frequencies = np.linspace(min_freq, max_freq, len(label_positions))
 
-                    max_height = config['spectrum_height'] - 2
+            # Build label line
+            label_chars = [' '] * (width - 2)
+            for pos, freq in zip(label_positions, label_frequencies):
+                label = f"{freq:6.2f}"
+                for i, c in enumerate(label):
+                    if pos + i < len(label_chars):
+                        label_chars[pos + i] = c
+
+            result.append("│")
+            result.append(''.join(label_chars))
+            result.append("│\n")
+        else:
+            result.append("│" + " " * (width - 2) + "│\n")
+
+        result.append("╰" + "─" * (width - 2) + "╯")
+        return result
+
+
+class WaterfallWidget(Static):
+    """Widget to display the waterfall (time series) view."""
+
+    time_series = reactive([])
+    min_power = reactive(DEFAULT_MIN_POWER)
+    max_power = reactive(DEFAULT_MAX_POWER)
+
+    def render(self) -> Text:
+        """Render the waterfall display."""
+        width = self.size.width
+        height = self.size.height
+
+        if height < 3 or width < 3:
+            return Text("")
+
+        result = Text()
+        result.append("╭─ Waterfall ", style="bold")
+        result.append("─" * (width - 13) + "╮\n")
+
+        # Calculate available height for waterfall data
+        available_height = height - 2  # Subtract top and bottom borders
+
+        # Block character for waterfall
+        block = '█'
+
+        # Draw waterfall rows
+        for row in range(available_height):
+            result.append("│")
+
+            if row < len(self.time_series):
+                data = self.time_series[row]
+                if data:
+                    sorted_x = sorted(data.keys())
+                    sorted_powers = [data[freq] for freq in sorted_x]
+                    mapped_indices = np.linspace(0, width - 3, len(sorted_x)).astype(int)
+
+                    # Build row
+                    row_chars = [' '] * (width - 2)
                     for i, index in enumerate(mapped_indices):
-                        height = int(normalized_powers[i]*8)/8
-                        for y in range(int(ceil(height))):
-                            c = charmap[min(height-y, 1.0)]
-                            try:
-                                spectrum_win.addch(config['spectrum_height'] - 2 - y, index, c,
-                                                 get_color(sorted_powers[i], min_power, max_power))
-                            except:
-                                pass
+                        if index < len(row_chars):
+                            color = get_color(sorted_powers[i], self.min_power, self.max_power)
+                            row_chars[index] = (block, color)
 
-                    # Draw frequency labels with overlap prevention
-                    sorted_frequencies = sorted(display_data.keys())
-                    if sorted_frequencies:
-                        min_freq = sorted_frequencies[0] / 1000000
-                        max_freq = sorted_frequencies[-1] / 1000000
+                    # Output with colors
+                    for item in row_chars:
+                        if isinstance(item, tuple):
+                            result.append(item[0], style=item[1])
+                        else:
+                            result.append(item)
+                else:
+                    result.append(" " * (width - 2))
+            else:
+                result.append(" " * (width - 2))
 
-                        # Calculate how many labels we can fit
-                        max_labels = max(1, (max_x - 2) // LABEL_SPACING)
-                        label_positions = np.linspace(1, max_x - 7, max_labels).astype(int)
-                        label_frequencies = np.linspace(min_freq, max_freq, len(label_positions))
+            result.append("│\n")
 
-                        for pos, freq in zip(label_positions, label_frequencies):
-                            try:
-                                if pos + 6 < max_x:
-                                    spectrum_win.addstr(config['spectrum_height'] - 1, pos, f"{freq:6.2f}")
-                            except:
-                                pass
+        result.append("╰" + "─" * (width - 2) + "╯")
+        return result
 
-                # Update time series visualization
-                time_series_win.box()
-                time_series_win.addstr(0, 2, " Waterfall ")
 
-                c = '\u2588'
-                for row, data in enumerate(time_series[:time_series_height - 2]):
-                    if data:
-                        sorted_x = sorted(data.keys())
-                        sorted_powers = [data[freq] for freq in sorted_x]
-                        mapped_indices = np.linspace(1, max_x - 2, len(sorted_x)).astype(int)
+class StatusLine(Static):
+    """Widget to display the status line."""
 
-                        for i, index in enumerate(mapped_indices):
-                            try:
-                                time_series_win.addch(row + 1, index, c,
-                                                    get_color(sorted_powers[i], min_power, max_power))
-                            except:
-                                pass
+    min_power = reactive(DEFAULT_MIN_POWER)
+    max_power = reactive(DEFAULT_MAX_POWER)
+    fps = reactive(DEFAULT_FRAME_RATE)
 
-            # Update status line
-            status_text = f"Range: {min_power:.0f} to {max_power:.0f} dBm | FPS: {config['fps']} | Press 'h' for help"
-            try:
-                status_win.addstr(0, 0, status_text[:max_x-1])
-            except:
-                pass
+    def render(self) -> Text:
+        """Render the status line."""
+        text = f"Range: {self.min_power:.0f} to {self.max_power:.0f} dBm | FPS: {self.fps} | Press '?' for help | 'q' to quit"
+        return Text(text, style="bold reverse")
 
-            stdscr.refresh()
-            spectrum_win.refresh()
-            time_series_win.refresh()
-            status_win.refresh()
-    except KeyboardInterrupt:
-        stop_event.set()
-    finally:
-        stop_event.set()
-        print("\n")
+
+class HelpOverlay(Static):
+    """Widget to display help information."""
+
+    def render(self) -> Text:
+        """Render the help overlay."""
+        help_text = """
+╭──────── KEYBOARD SHORTCUTS ────────╮
+│  q - Quit                          │
+│  p - Pause/Resume                  │
+│  ? - Toggle this help              │
+│  m - Toggle peak hold              │
+│  + - Increase sensitivity          │
+│  - - Decrease sensitivity          │
+│                                    │
+│  Press '?' to close this help      │
+╰────────────────────────────────────╯
+"""
+        return Text(help_text, style="bold reverse")
+
+
+class SpectrumAnalyzerApp(App):
+    """Textual application for the spectrum analyzer."""
+
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+
+    #spectrum {
+        height: auto;
+        max-height: 10;
+    }
+
+    #waterfall {
+        height: 1fr;
+    }
+
+    #status {
+        height: 1;
+        dock: bottom;
+    }
+
+    #help {
+        align: center middle;
+        width: 40;
+        height: 12;
+        layer: overlay;
+    }
+
+    .hidden {
+        display: none;
+    }
+    """
+
+    def __init__(self, frequency_power_generator, stop_event, config):
+        super().__init__()
+        self.frequency_power_generator = frequency_power_generator
+        self.stop_event = stop_event
+        self.config = config
+
+        # State
+        self.paused = False
+        self.peak_hold = False
+        self.peak_data = {}
+        self.show_help = False
+        self.time_series = []
+        self.last_update_time = time.time()
+        self.frame_interval = 1 / config['fps']
+        self.min_power = config['min_power']
+        self.max_power = config['max_power']
+
+        # Start data thread
+        self.data_thread = threading.Thread(target=self._data_worker, daemon=True)
+        self.data_thread.start()
+
+    def compose(self) -> ComposeResult:
+        """Create child widgets."""
+        self.spectrum = SpectrumWidget(id="spectrum")
+        self.spectrum.spectrum_height = self.config['spectrum_height']
+        self.spectrum.min_power = self.min_power
+        self.spectrum.max_power = self.max_power
+
+        self.waterfall = WaterfallWidget(id="waterfall")
+        self.waterfall.min_power = self.min_power
+        self.waterfall.max_power = self.max_power
+
+        self.status = StatusLine(id="status")
+        self.status.min_power = self.min_power
+        self.status.max_power = self.max_power
+        self.status.fps = self.config['fps']
+
+        self.help_overlay = HelpOverlay(id="help")
+        self.help_overlay.add_class("hidden")
+
+        yield self.spectrum
+        yield self.waterfall
+        yield self.status
+        yield self.help_overlay
+
+    def _data_worker(self):
+        """Background thread to consume data from the generator."""
+        try:
+            for timestamp, frequency_power_map in self.frequency_power_generator:
+                if self.stop_event.is_set():
+                    break
+
+                if not self.paused:
+                    # Update peak hold data
+                    if self.peak_hold:
+                        for freq, power in frequency_power_map.items():
+                            self.peak_data[freq] = max(
+                                self.peak_data.get(freq, float('-inf')),
+                                power
+                            )
+
+                    # Add to time series
+                    self.time_series.insert(0, frequency_power_map)
+
+                    # Update display at frame rate
+                    current_time = time.time()
+                    if current_time - self.last_update_time >= self.frame_interval:
+                        self.last_update_time = current_time
+                        self.call_from_thread(self._update_display, frequency_power_map)
+        except Exception as e:
+            logging.error(f"Error in data worker: {e}")
+            self.stop_event.set()
+
+    def _update_display(self, data):
+        """Update the display widgets (called from data thread)."""
+        # Trim time series to available height
+        if hasattr(self.waterfall, 'size') and self.waterfall.size.height > 2:
+            max_rows = self.waterfall.size.height - 2
+            self.time_series = self.time_series[:max_rows]
+
+        # Update widgets
+        self.spectrum.data = data
+        if self.peak_hold:
+            self.spectrum.peak_data = self.peak_data
+        self.spectrum.min_power = self.min_power
+        self.spectrum.max_power = self.max_power
+        self.spectrum.peak_hold = self.peak_hold
+        self.spectrum.paused = self.paused
+
+        self.waterfall.time_series = self.time_series
+        self.waterfall.min_power = self.min_power
+        self.waterfall.max_power = self.max_power
+
+        self.status.min_power = self.min_power
+        self.status.max_power = self.max_power
+
+    def on_key(self, event: events.Key) -> None:
+        """Handle keyboard input."""
+        if event.key == "q":
+            self.stop_event.set()
+            self.exit()
+        elif event.key == "p":
+            self.paused = not self.paused
+        elif event.key == "question_mark":
+            self.show_help = not self.show_help
+            if self.show_help:
+                self.help_overlay.remove_class("hidden")
+            else:
+                self.help_overlay.add_class("hidden")
+        elif event.key == "m":
+            self.peak_hold = not self.peak_hold
+            if not self.peak_hold:
+                self.peak_data = {}
+        elif event.key == "plus" or event.key == "equals":
+            # Increase sensitivity (narrow range)
+            range_size = self.max_power - self.min_power
+            if range_size > 10:
+                self.min_power += 2
+                self.max_power -= 2
+        elif event.key == "minus" or event.key == "underscore":
+            # Decrease sensitivity (widen range)
+            self.min_power -= 2
+            self.max_power += 2
+
+
+def run_spectrum_analyzer(frequency_power_generator, stop_event, config):
+    """Run the spectrum analyzer app."""
+    app = SpectrumAnalyzerApp(frequency_power_generator, stop_event, config)
+    app.run()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -299,8 +478,7 @@ if __name__ == "__main__":
     stop_event = threading.Event()
 
     try:
-        curses.wrapper(
-            spectrum_analyzer,
+        run_spectrum_analyzer(
             hackrf_sweep.frequency_power_generator(),
             stop_event,
             config
